@@ -1,0 +1,109 @@
+# ============================================================
+# AI Foundry API Converter — Configuration
+# ============================================================
+
+# Active model key (must match one of the keys in 'models' below)
+active_model: "claude-sonnet-4.6"
+
+# ----------------------------------------------------------
+# Model Definitions
+# ----------------------------------------------------------
+# Each model needs a deployment on Azure AI Foundry.
+# env_endpoint_key / env_api_key reference variables in .env
+# ----------------------------------------------------------
+models:
+  claude-opus-4.6:
+    display_name: "Claude Opus 4.6 (Anthropic)"
+    deployment_name: "claude-opus-4-6"
+    env_endpoint_key: "AZURE_ENDPOINT_CLAUDE_OPUS"
+    env_api_key: "AZURE_API_KEY_CLAUDE_OPUS"
+    api_version: "2024-12-01-preview"
+    max_output_tokens: 8192
+    temperature: 0.7
+
+  gpt-5.3-codex:
+    display_name: "GPT-5.3 Codex (OpenAI)"
+    deployment_name: "gpt-5-3-codex"
+    env_endpoint_key: "AZURE_ENDPOINT_GPT53_CODEX"
+    env_api_key: "AZURE_API_KEY_GPT53_CODEX"
+    api_version: "2024-12-01-preview"
+    max_output_tokens: 8192
+    temperature: 0.7
+
+  gpt-5.2:
+    display_name: "GPT-5.2 (OpenAI)"
+    deployment_name: "gpt-5-2"
+    env_endpoint_key: "AZURE_ENDPOINT_GPT52"
+    env_api_key: "AZURE_API_KEY_GPT52"
+    api_version: "2024-12-01-preview"
+    max_output_tokens: 8192
+    temperature: 0.7
+
+  grok-4:
+    display_name: "Grok-4 (xAI)"
+    deployment_name: "grok-4"
+    env_endpoint_key: "AZURE_ENDPOINT_GROK4"
+    env_api_key: "AZURE_API_KEY_GROK4"
+    api_version: "2024-12-01-preview"
+    max_output_tokens: 8192
+    temperature: 0.7
+
+  claude-sonnet-4.6:
+    display_name: "Claude Sonnet 4.6 (Anthropic)"
+    deployment_name: "claude-sonnet-4-6"
+    env_endpoint_key: "AZURE_ENDPOINT_CLAUDE_SONNET"
+    env_api_key: "AZURE_API_KEY_CLAUDE_SONNET"
+    api_version: "2024-12-01-preview"
+    max_output_tokens: 8192
+    temperature: 0.7
+
+  mistral-large-3:
+    display_name: "Mistral Large 3 (Mistral AI)"
+    deployment_name: "mistral-large-3"
+    env_endpoint_key: "AZURE_ENDPOINT_MISTRAL_LARGE"
+    env_api_key: "AZURE_API_KEY_MISTRAL_LARGE"
+    api_version: "2024-12-01-preview"
+    max_output_tokens: 8192
+    temperature: 0.7
+
+# ----------------------------------------------------------
+# Conversion Settings
+# ----------------------------------------------------------
+conversion:
+  # Corpus injection mode:
+  #   'full'             — load entire ST corpus into system prompt
+  #   'select_files'     — load only files listed in corpus_files
+  #   'core_axioms_only' — load only Core Axiom 1–9
+  corpus_mode: "core_axioms_only"
+
+  # Only used when corpus_mode is 'select_files'
+  corpus_files:
+    - "Core Axiom 1.md"
+    - "Core Axiom 2.md"
+    - "Base Reality.md"
+
+  # Conversation history window:
+  #   'full' — keep entire conversation (all previous chapters)
+  #   integer — sliding window: keep last N chapter exchanges
+  history_window: "full"
+
+  # Q&D generation mode:
+  #   'per_chapter'  — ask for Q&D with each chapter prompt
+  #   'end_of_book'  — single Q&D request after all chapters are done
+  qd_mode: "end_of_book"
+
+# ----------------------------------------------------------
+# Execution Settings
+# ----------------------------------------------------------
+# Executor name used in checkpoint filenames and logs
+executor_name: "api-converter"
+
+# Translation processing priority order (prefix matching)
+translation_priority:
+  - "eng-"
+  - "pol-"
+  - "dan-"
+  - "deu-"
+  - "spa-"
+  - "fra-"
+  - ""
