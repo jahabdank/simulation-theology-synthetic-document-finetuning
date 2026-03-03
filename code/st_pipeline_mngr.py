@@ -16,17 +16,36 @@ SDF_CHECKPOINTS_DIR = DATA_DIR / "sdf-checkpoints"
 SDF_OUT_DIR = DATA_DIR / "sdf"
 QD_OUT_DIR = DATA_DIR / "questions-dillemas"
 AGENT_LOG_DIR = DATA_DIR / "agent-log"
-TMP_DIR = DATA_DIR / "tmp"
+TMP_DIR = DATA_DIR / "drafts"
+PROMPTS_DIR = ROOT_DIR / "prompts"
+PIPELINE_LOG_DIR = DATA_DIR / "pipeline-logs"
 
+CURRENT_LOG_FILE = None
 
 def log_message(msg):
     print(msg)
+    if CURRENT_LOG_FILE is not None:
+        try:
+            with open(CURRENT_LOG_FILE, "a", encoding="utf-8") as f:
+                now_str = datetime.datetime.now(datetime.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{now_str}] {msg}\n")
+        except Exception:
+            pass
+
+
+def print_next_steps(lines):
+    """Prints a clearly delimited NEXT STEPS block that the agent must follow."""
+    log_message("")
+    log_message("╔══════════════════════════════════════════════╗")
+    log_message("║              ▶ NEXT STEPS                   ║")
+    log_message("╚══════════════════════════════════════════════╝")
+    for line in lines:
+        log_message(line)
+    log_message("─── END NEXT STEPS ────────────────────────────")
 
 
 def sanitize_name(name):
-    """
-    Standardizes names for file paths and identifiers.
-    """
+    """Standardizes names for file paths and identifiers."""
     return name.lower().strip().replace(" ", "-").replace("!", "").replace("_", "-")
 
 
@@ -41,16 +60,10 @@ def resolve_translation(translation):
         "bsb": "engbsb",
         "webp": "engwebp"
     }
-    
-    # Strip hypothetical language prefix for mapping check
     lookup_key = t[4:] if t.startswith("eng-") else t
     res = mapping.get(lookup_key, translation)
-    
-    # Ensure prefix if missing
     if "-" not in res:
         res = f"eng-{res}"
-
-    # Verify exact casing by matching against the corpus directory
     if EBIBLE_CORPUS.exists():
         for f in EBIBLE_CORPUS.glob("*.txt"):
             if f.stem.lower() == res.lower():
@@ -69,15 +82,52 @@ def parse_vref():
     return vrefs
 
 
+def get_total_chapters(book_code, translation=None):
+    """Returns the total number of chapters for a book from vref."""
+    vrefs = parse_vref()
+    chapters = set()
+    for ref in vrefs:
+        if not ref:
+            continue
+        parts = ref.split(" ")
+        if len(parts) >= 2 and parts[0] == book_code:
+            chapters.add(int(parts[1].split(":")[0]))
+    return max(chapters) if chapters else 0
+
+
+def read_checkpoint_meta(cp_file):
+    """Reads and returns (content, meta_dict) from a checkpoint file."""
+    with open(cp_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
+    if match:
+        meta = yaml.safe_load(match.group(1))
+        return content, meta
+    return content, {}
+
+
+def write_checkpoint_meta(cp_file, content, meta):
+    """Writes updated meta back to checkpoint file."""
+    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
+    if match:
+        new_yaml = yaml.dump(meta, sort_keys=False)
+        new_content = content.replace(match.group(1), new_yaml.strip() + "\n")
+        with open(cp_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        return new_content
+    return content
+
+
+# ══════════════════════════════════════════════
+# COMMANDS
+# ══════════════════════════════════════════════
+
 def status_cmd(args):
-    """
-    Scans checkpoints and ebible corpus to suggest the next action.
-    """
+    """Scans checkpoints and ebible corpus to suggest the next action."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
 
-    # Get available books for the translation
     trans_file = EBIBLE_CORPUS / f"{translation}.txt"
     if not trans_file.exists():
         log_message(f"Error: Translation file {trans_file} not found.")
@@ -92,111 +142,72 @@ def status_cmd(args):
         if book not in available_books:
             available_books.append(book)
 
-    # Scan checkpoints
     checkpoints = list(SDF_CHECKPOINTS_DIR.glob(f"{executor}_{model}_{translation}_*.md"))
-    
-    abandoned = []
-    completed = []
-    in_progress = []
-    
+    abandoned, completed, in_progress = [], [], []
     now = datetime.datetime.now(datetime.timezone.utc)
 
     for cp in checkpoints:
         try:
-            with open(cp, "r", encoding="utf-8") as f:
-                content = f.read()
-            match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                meta = yaml.safe_load(match.group(1))
-                book_code = meta.get("book_code")
-                status = meta.get("status")
-                last_updated = datetime.datetime.fromisoformat(meta.get("last_updated_at", now.isoformat()))
-                
-                if status == "COMPLETED":
-                    completed.append(book_code)
-                elif status == "IN_PROGRESS":
-                    if (now - last_updated).total_seconds() > 20 * 60:
-                        abandoned.append(book_code)
-                    else:
-                        in_progress.append(book_code)
+            _, meta = read_checkpoint_meta(cp)
+            book_code = meta.get("book_code")
+            status = meta.get("status")
+            last_updated = datetime.datetime.fromisoformat(meta.get("last_updated_at", now.isoformat()))
+            if status == "COMPLETED":
+                completed.append(book_code)
+            elif status == "IN_PROGRESS":
+                if (now - last_updated).total_seconds() > 20 * 60:
+                    abandoned.append(book_code)
+                else:
+                    in_progress.append(book_code)
         except Exception as e:
             log_message(f"Error parsing checkpoint {cp}: {e}")
 
     log_message("=== Pipeline Status ===")
     log_message(f"Executor: {executor} | Model: {model} | Translation: {translation}")
-    log_message(f"Completed books: {len(completed)}")
-    log_message(f"In-progress (active) books: {len(in_progress)}")
-    log_message(f"Abandoned books: {len(abandoned)}")
-    
+    log_message(f"Completed: {len(completed)} | Active: {len(in_progress)} | Abandoned: {len(abandoned)}")
+
     if abandoned:
-        log_message("\nRECOMMENDATION: Recover an abandoned book.")
-        log_message(f"Book to recover: {abandoned[0]}")
+        log_message(f"\nRECOMMENDATION: Recover abandoned book: {abandoned[0]}")
     else:
-        # Find first unclaimed book in canonical order
         unclaimed = [b for b in available_books if b not in completed and b not in in_progress and b not in abandoned]
         if unclaimed:
-            log_message("\nRECOMMENDATION: Claim a new book.")
-            log_message(f"Next unclaimed book: {unclaimed[0]}")
+            log_message(f"\nRECOMMENDATION: Claim new book: {unclaimed[0]}")
         else:
-            log_message("\nRECOMMENDATION: No books left to process for this translation!")
+            log_message("\nNo books left to process for this translation!")
 
 
 def claim_cmd(args):
-    """
-    Claims a new book or recovers an abandoned one.
-    """
+    """Claims a new book or recovers an abandoned one."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
     book_code = args.book_code.upper()
-    
+
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
     agent_host = os.uname().nodename if hasattr(os, "uname") else "unknown"
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    
     starting_chapter = 1
 
     if cp_file.exists():
-        # Recovery
         log_message(f"Recovering checkpoint {cp_file.name}...")
-        with open(cp_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        # Parse YAML
-        match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-        if match:
-            meta = yaml.safe_load(match.group(1))
-            meta["last_updated_at"] = now_iso
-            meta["agent_host"] = agent_host
-            
-            # Find last completed chapter
-            table_lines = [line for line in content.split("\n") if "|" in line]
-            last_chapter = 0
-            for line in table_lines:
-                ch_match = re.search(r"CHAPTER (\d+) COMPLETE", line)
-                if ch_match:
-                    last_chapter = int(ch_match.group(1))
-            
-            starting_chapter = last_chapter + 1
-            log_message(f"Last complete chapter was {last_chapter}. Starting from {starting_chapter}.")
-            
-            # Write back updated meta and recovery log
-            new_yaml = yaml.dump(meta, sort_keys=False)
-            new_content = content.replace(match.group(1), new_yaml.strip() + "\n")
-            recovery_log = f"| `{now_iso}` | `RECOVERED` | `/convert` | Dropped partial chapter {starting_chapter}. Resuming from chapter {starting_chapter}. |\n"
-            new_content += recovery_log
-            
-            with open(cp_file, "w", encoding="utf-8") as f:
-                f.write(new_content)
-                
-            # Truncate SDF and Q&D files
-            # This is complex to do robustly with plain text, we will let the agent know
-            log_message("WARNING: Make sure to drop any partial SDF or Q&D data for the starting chapter!")
+        content, meta = read_checkpoint_meta(cp_file)
+        meta["last_updated_at"] = now_iso
+        meta["agent_host"] = agent_host
+
+        # Find last completed chapter
+        last_chapter = 0
+        for ch_match in re.finditer(r"CHAPTER (\d+) COMPLETE", content):
+            last_chapter = max(last_chapter, int(ch_match.group(1)))
+        starting_chapter = last_chapter + 1
+        log_message(f"Last complete chapter: {last_chapter}. Resuming from {starting_chapter}.")
+
+        new_content = write_checkpoint_meta(cp_file, content, meta)
+        recovery_log = f"| `{now_iso}` | `RECOVERED` | `/convert` | Resuming from chapter {starting_chapter} on {agent_host}. |\n"
+        with open(cp_file, "a", encoding="utf-8") as f:
+            f.write(recovery_log)
     else:
-        # New Claim
         log_message(f"Creating new checkpoint for {book_code}...")
         job_id = str(uuid.uuid4())
-        
         meta = {
             "job_id": job_id,
             "workflow_executor": executor,
@@ -208,43 +219,46 @@ def claim_cmd(args):
             "started_at": now_iso,
             "last_updated_at": now_iso,
             "status": "IN_PROGRESS",
-            "agent_host": agent_host
+            "agent_host": agent_host,
+            "total_chapters": 0
         }
-        
         yaml_str = yaml.dump(meta, sort_keys=False)
         content = f"---\n{yaml_str}---\n\n# Checkpoint: {executor} - {model} - {translation} - {book_code}\n\n"
         content += "| Timestamp | Status | Set By | Details & Metrics |\n"
         content += "|-----------|--------|--------|-------------------|\n"
         content += f"| `{now_iso}` | `STARTED` | `/convert` | Claimed by agent on {agent_host} |\n"
-        
         SDF_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
         with open(cp_file, "w", encoding="utf-8") as f:
             f.write(content)
-            
-    log_message(f"Claim successful. You should start from Chapter {starting_chapter}.")
+
+    log_message(f"Claim successful. Starting from Chapter {starting_chapter}.")
+
+    # ── NEXT STEPS ──
+    print_next_steps([
+        f"Run this command to get the total chapter count:",
+        f"```",
+        f'python3 code/st_pipeline_mngr.py get-chapter-count --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}"',
+        f"```",
+    ])
 
 
 def get_chapter_cmd(args):
-    """
-    Extracts a specific chapter from the ebible corpus and initializes the workspace limits.
-    """
+    """Extracts a chapter and prints creative instructions + next save command."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
-    resolved_translation = translation
     book_code = args.book_code.upper()
     chapter = args.chapter
-    
-    trans_file = EBIBLE_CORPUS / f"{resolved_translation}.txt"
+
+    trans_file = EBIBLE_CORPUS / f"{translation}.txt"
     if not trans_file.exists():
         log_message(f"FATAL: Translation file {trans_file} not found.")
         sys.exit(1)
 
     vrefs = parse_vref()
-    
     with open(trans_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
-        
+
     chapter_text = []
     for i, ref in enumerate(vrefs):
         if not ref:
@@ -257,83 +271,108 @@ def get_chapter_cmd(args):
                 if i < len(lines):
                     chapter_text.append(f"{ref}: {lines[i].strip()}")
 
-    if chapter_text:
-        text_out = "\n".join(chapter_text)
-        
-        TMP_DIR.mkdir(parents=True, exist_ok=True)
-        raw_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_raw.txt"
-        st_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_st_text.md"
-        qd_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_qd_text.md"
-        
-        with open(raw_file, "w", encoding="utf-8") as f:
-            f.write(text_out)
-        with open(st_file, "w", encoding="utf-8") as f:
-            f.write("")
-        with open(qd_file, "w", encoding="utf-8") as f:
-            f.write("")
-            
-        log_message("=== BEGIN SOURCE TEXT ===")
-        log_message(text_out)
-        log_message("=== END SOURCE TEXT ===")
-        log_message("\n=== WORKSPACE INITIALIZED ===")
-        log_message(f"Raw Text Saved: {raw_file}")
-        log_message(f"Write ST Here: {st_file}")
-        log_message(f"Write QD Here: {qd_file}")
-    else:
-        log_message(f"FATAL: Chapter {chapter} not found in {book_code}. The book may not have this many chapters.")
+    if not chapter_text:
+        log_message(f"FATAL: Chapter {chapter} not found in {book_code}.")
         sys.exit(1)
+
+    text_out = "\n".join(chapter_text)
+
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    raw_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_raw.txt"
+    st_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_st_text.md"
+    qd_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_qd_text.md"
+
+    log_message(f"--- FSTRACE: Creating draft workspaces for chapter {chapter}... ---")
+    log_message(f"--- FSTRACE: Generated {raw_file} ---")
+    with open(raw_file, "w", encoding="utf-8") as f:
+        f.write(text_out)
+
+    log_message(f"--- FSTRACE: Generated empty draft: {st_file} ---")
+    with open(st_file, "w", encoding="utf-8") as f:
+        f.write("")
+        
+    log_message(f"--- FSTRACE: Generated empty draft: {qd_file} ---")
+    with open(qd_file, "w", encoding="utf-8") as f:
+        f.write("")
+
+    log_message("=== BEGIN SOURCE TEXT ===")
+    log_message(text_out)
+    log_message("=== END SOURCE TEXT ===")
+
+    # Print creative instructions
+    creative_file = PROMPTS_DIR / "01_creative_instructions.md"
+    if creative_file.exists():
+        with open(creative_file, "r", encoding="utf-8") as f:
+            log_message(f.read().replace("{BOOK}", book_code).replace("{CH}", str(chapter)))
+    
+    qd_format_file = PROMPTS_DIR / "02_qd_format_instructions.md"
+    if qd_format_file.exists():
+        with open(qd_format_file, "r", encoding="utf-8") as f:
+            log_message(f.read().replace("{CH}", str(chapter)))
+
+    # ── NEXT STEPS ──
+    print_next_steps([
+        f"1. Write your ST rewrite to this file:",
+        f"   {st_file}",
+        f"",
+        f"2. Write any Q&D dilemmas to this file (or leave empty):",
+        f"   {qd_file}",
+        f"",
+        f"3. After writing BOTH files, run this EXACT command:",
+        f"```",
+        f'python3 code/st_pipeline_mngr.py save-chapter --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}" --chapter {chapter}',
+        f"```",
+        f"",
+        f"⚠ DO NOT skip save-chapter. DO NOT re-run status or claim.",
+    ])
 
 
 def save_chapter_cmd(args):
     """
-    Saves the translated chapter and Q&D items, updates checkpoint.
-    Handles both naming conventions for temp files:
-      - Pipeline convention: {executor}_{model}_{BOOK}_ch{N}_*.md
-      - Agent convention:    {executor}_{model}_{BOOK}_{N}_*.md (no 'ch' prefix)
+    Saves translated chapter, updates checkpoint, prints next command.
+    Handles both naming conventions for temp files.
     """
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
     book_code = args.book_code.upper()
     chapter = args.chapter
-    
-    # Pipeline-convention files (created by get-chapter)
+
+    # Look for files in both naming conventions
     st_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_st_text.md"
     qd_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_qd_text.md"
     raw_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_raw.txt"
-    
-    # Agent-convention files (some models create these directly)
     st_file_alt = TMP_DIR / f"{executor}_{model}_{book_code}_{chapter}_st_text.md"
     qd_file_alt = TMP_DIR / f"{executor}_{model}_{book_code}_{chapter}_qd_text.md"
     raw_file_alt = TMP_DIR / f"{executor}_{model}_{book_code}_{chapter}_raw.txt"
-    
-    # Find the ST file from either convention
+
     if st_file.exists():
         active_st = st_file
     elif st_file_alt.exists():
         active_st = st_file_alt
     else:
-        log_message(f"FATAL: ST file not found. Checked:")
+        log_message("FATAL: ST file not found. Checked:")
         log_message(f"  {st_file}")
         log_message(f"  {st_file_alt}")
-        log_message("Did you write to the correct workspace path?")
         sys.exit(1)
-    
+
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     now_date = datetime.datetime.now().strftime("%Y%m%d")
+
+    log_message(f"--- FSTRACE: Looking for written ST drafts... ---")
+    log_message(f"--- FSTRACE: Found draft: {active_st} ---")
+
+    # Read ST text
+    with open(active_st, "r", encoding="utf-8") as f:
+        st_text = f.read()
+    word_count = len(st_text.split())
 
     # SDF Output
     sdf_out_subdir = SDF_OUT_DIR / f"{translation}_{model}_{executor}"
     sdf_out_subdir.mkdir(parents=True, exist_ok=True)
     sdf_file = sdf_out_subdir / f"{book_code}.md"
-    
-    with open(active_st, "r", encoding="utf-8") as f:
-        st_text = f.read()
-        
-    word_count = len(st_text.split())
 
     if not sdf_file.exists() or chapter == 1:
-        # Create with YAML
         frontmatter = f"""---
 source_religion: Christianity
 source_tradition: Protestant
@@ -362,86 +401,119 @@ pass_number: 1
                 text = f.read()
                 if text.strip():
                     qd_combined += text + "\n\n"
-    
+
     if qd_combined.strip():
         qd_file_out = QD_OUT_DIR / f"{now_date}_{executor}_{model}_{translation}_{book_code}.md"
         QD_OUT_DIR.mkdir(parents=True, exist_ok=True)
         qd_count = qd_combined.count("### Q")
         with open(qd_file_out, "a", encoding="utf-8") as fout:
             fout.write(qd_combined)
-                    
+
     # Update checkpoint
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
     if not cp_file.exists():
-        log_message(f"FATAL: Checkpoint file {cp_file} not found! You must run 'claim' before 'save-chapter'.")
+        log_message(f"FATAL: Checkpoint {cp_file} not found! Run 'claim' first.")
         sys.exit(1)
 
-    with open(cp_file, "r", encoding="utf-8") as f:
-        content = f.read()
-    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-    if match:
-        meta = yaml.safe_load(match.group(1))
-        meta["last_updated_at"] = now_iso
-        
-        new_yaml = yaml.dump(meta, sort_keys=False)
-        new_content = content.replace(match.group(1), new_yaml.strip() + "\n")
-        
-        tokens_in = args.tokens_in if args.tokens_in else "?"
-        tokens_out = args.tokens_out if args.tokens_out else "?"
-        
-        log_entry = f"| `{now_iso}` | `CHAPTER {chapter} COMPLETE` | `/convert` | Wrote {word_count} words. Added {qd_count} Q&D items. Tokens: {tokens_in}/{tokens_out}. |\n"
-        new_content += log_entry
-        
-        with open(cp_file, "w", encoding="utf-8") as f:
-            f.write(new_content)
-                
-    # Cleanup workspace — both naming conventions
+    content, meta = read_checkpoint_meta(cp_file)
+    meta["last_updated_at"] = now_iso
+    new_content = write_checkpoint_meta(cp_file, content, meta)
+
+    tokens_in = args.tokens_in if args.tokens_in else "?"
+    tokens_out = args.tokens_out if args.tokens_out else "?"
+    log_entry = f"| `{now_iso}` | `CHAPTER {chapter} COMPLETE` | `/convert` | Wrote {word_count} words. {qd_count} Q&D. Tokens: {tokens_in}/{tokens_out}. |\n"
+    with open(cp_file, "a", encoding="utf-8") as f:
+        f.write(log_entry)
+
+    # Cleanup workspace — both conventions
+    log_message(f"--- FSTRACE: Cleaning up workspace drafts... ---")
     for f in [st_file, qd_file, raw_file, st_file_alt, qd_file_alt, raw_file_alt]:
         if f.exists():
             f.unlink()
-                
-    log_message(f"Chapter {chapter} saved and workspace cleaned successfully.")
+            log_message(f"--- FSTRACE: Deleted {f} ---")
+
+    log_message(f"✅ Chapter {chapter} saved. {word_count} words, {qd_count} Q&D items.")
+
+    # Determine total chapters from checkpoint or vref
+    total_chapters = meta.get("total_chapters", 0)
+    if total_chapters == 0:
+        total_chapters = get_total_chapters(book_code)
+
+    # ── NEXT STEPS ──
+    if chapter < total_chapters:
+        next_ch = chapter + 1
+        lines = [
+            f"Chapter {chapter}/{total_chapters} complete.",
+            f"",
+            f"Run this command to get the next chapter:",
+            f"```",
+            f'python3 code/st_pipeline_mngr.py get-chapter --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}" --chapter {next_ch}',
+            f"```",
+            f"",
+            f"⚠ DO NOT re-run status, claim, or get-chapter-count.",
+            f"⚠ DO NOT skip save-chapter after writing.",
+        ]
+        # Context refresh every 10 chapters
+        if chapter % 10 == 0:
+            lines.append("")
+            lines.append("── CONTEXT REFRESH ──")
+            lines.append("Reminder: The critical invariant is:")
+            lines.append("  get-chapter → write ST + Q&D → save-chapter → (repeat)")
+            lines.append("Never deviate from this loop.")
+        print_next_steps(lines)
+    else:
+        print_next_steps([
+            f"🏁 All {total_chapters} chapters complete!",
+            f"",
+            f"Run the integrity check:",
+            f"```",
+            f'python3 code/st_pipeline_mngr.py verify-book --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}"',
+            f"```",
+        ])
+
 
 def complete_pass_cmd(args):
-    """
-    Marks the first pass as complete in the checkpoint.
-    """
+    """Marks the first pass as complete in the checkpoint."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
     book_code = args.book_code.upper()
     total_chapters = args.total_chapters
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
-    
+
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
     if not cp_file.exists():
-        log_message(f"FATAL: Checkpoint {cp_file} not found! Cannot complete pass without a checkpoint.")
+        log_message(f"FATAL: Checkpoint {cp_file} not found!")
         sys.exit(1)
 
-    with open(cp_file, "r", encoding="utf-8") as f:
-        content = f.read()
+    content, meta = read_checkpoint_meta(cp_file)
+    meta["last_updated_at"] = now_iso
+    meta["status"] = "COMPLETED"
+    write_checkpoint_meta(cp_file, content, meta)
 
-    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-    if match:
-        meta = yaml.safe_load(match.group(1))
-        meta["last_updated_at"] = now_iso
-        meta["status"] = "COMPLETED"
-        
-        new_yaml = yaml.dump(meta, sort_keys=False)
-        new_content = content.replace(match.group(1), new_yaml.strip() + "\n")
-        
-        new_content += f"| `{now_iso}` | `FIRST_PASS_COMPLETE` | `/convert` | Total chapters: {total_chapters}. |\n"
-        new_content += f"| `{now_iso}` | `QD_CREATED` | `/convert` | Saved Q&D file with dilemmas. |\n"
-        
-        with open(cp_file, "w", encoding="utf-8") as f:
-            f.write(new_content)
-    log_message("Pass completed successfully.")
+    with open(cp_file, "a", encoding="utf-8") as f:
+        f.write(f"| `{now_iso}` | `FIRST_PASS_COMPLETE` | `/convert` | Total chapters: {total_chapters}. |\n")
+        f.write(f"| `{now_iso}` | `QD_CREATED` | `/convert` | Saved Q&D file with dilemmas. |\n")
+
+    log_message(f"✅ Book {book_code} marked as COMPLETED.")
+
+    # ── NEXT STEPS ──
+    print_next_steps([
+        f"Book {book_code} is complete! 🎉",
+        f"",
+        f"To continue with the next book, re-invoke the workflow:",
+        f"  /convert-bible-to-st-automated {args.executor} {args.model}",
+        f"",
+        f"This ensures a fresh context window for the next book.",
+        f"DO NOT continue in this session — stop here.",
+    ])
+
 
 def check_status_for_translation(executor, model, translation):
+    """Internal helper for next-task."""
     trans_file = EBIBLE_CORPUS / f"{translation}.txt"
     if not trans_file.exists():
         return None
-
     vrefs = parse_vref()
     available_books = []
     for ref in vrefs:
@@ -450,124 +522,124 @@ def check_status_for_translation(executor, model, translation):
         book = ref.split(" ")[0]
         if book not in available_books:
             available_books.append(book)
-
     checkpoints = list(SDF_CHECKPOINTS_DIR.glob(f"{executor}_{model}_{translation}_*.md"))
-    
-    abandoned = []
-    completed = []
-    in_progress = []
-    
+    abandoned, completed, in_progress = [], [], []
     now = datetime.datetime.now(datetime.timezone.utc)
-
     for cp in checkpoints:
         try:
-            with open(cp, "r", encoding="utf-8") as f:
-                content = f.read()
-            match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                meta = yaml.safe_load(match.group(1))
-                book_code = meta.get("book_code")
-                status = meta.get("status")
-                last_updated = datetime.datetime.fromisoformat(meta.get("last_updated_at", now.isoformat()))
-                
-                if status == "COMPLETED":
-                    completed.append(book_code)
-                elif status == "IN_PROGRESS":
-                    if (now - last_updated).total_seconds() > 20 * 60:
-                        abandoned.append(book_code)
-                    else:
-                        in_progress.append(book_code)
+            _, meta = read_checkpoint_meta(cp)
+            book_code = meta.get("book_code")
+            status = meta.get("status")
+            last_updated = datetime.datetime.fromisoformat(meta.get("last_updated_at", now.isoformat()))
+            if status == "COMPLETED":
+                completed.append(book_code)
+            elif status == "IN_PROGRESS":
+                if (now - last_updated).total_seconds() > 20 * 60:
+                    abandoned.append(book_code)
+                else:
+                    in_progress.append(book_code)
         except Exception:
             pass
-
     if abandoned:
         return ("RECOVER", abandoned[0])
-    
     unclaimed = [b for b in available_books if b not in completed and b not in in_progress and b not in abandoned]
     if unclaimed:
         return ("CLAIM", unclaimed[0])
-        
     return None
 
+
 def next_task_cmd(args):
+    """Finds the next book and translation to work on."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
-    
+
     prefixes = ["eng-", "pol-", "dan-", "deu-", "spa-", "fra-", ""]
     all_files = list(EBIBLE_CORPUS.glob("*.txt"))
-    
+
     for prefix in prefixes:
         matching_files = sorted([f.name for f in all_files if f.name.startswith(prefix)])
-        
         for filename in matching_files:
             translation = filename.replace(".txt", "")
             result = check_status_for_translation(executor, model, translation)
             if result:
                 action, book = result
-                log_message(f"=== Next Task Found ===")
+                log_message("=== Next Task Found ===")
                 log_message(f"TRANSLATION={translation}")
                 log_message(f"BOOK_CODE={book}")
                 log_message(f"ACTION={action}")
+
+                # ── NEXT STEPS ──
+                print_next_steps([
+                    f"Run this command to {action.lower()} {book}:",
+                    f"```",
+                    f'CORPUS_VER=$(git -C ../simulation-theology-corpus rev-parse --short HEAD)',
+                    f'PIPELINE_VER=$(git rev-parse --short HEAD)',
+                    f'python3 code/st_pipeline_mngr.py claim --executor "{args.executor}" --model "{args.model}" --translation "{translation}" --book_code "{book}" --corpus_version "$CORPUS_VER" --pipeline_version "$PIPELINE_VER"',
+                    f"```",
+                ])
                 return
-                
+
     log_message("=== Next Task Found ===")
     log_message("STATUS=COMPLETE")
-    log_message("No more books or translations available in the corpus!")
-    
+    log_message("All translations are finished! Nothing left to do.")
+
+
 def bootstrap_log_cmd(args):
-    """
-    Bootstraps the agent log directory and reads previous context.
-    """
+    """Bootstraps the agent log directory and reads previous context."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     log_dir = AGENT_LOG_DIR / f"{executor}_{model}"
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     log_files = sorted(list(log_dir.glob("*.md")))
-    log_message(f"=== Agent Logging Bootstrap ===")
-    log_message(f"Agent Name: {executor}")
+    log_message("=== Agent Logging Bootstrap ===")
+    log_message(f"Agent: {executor} | Model: {model}")
     log_message(f"Found {len(log_files)} past session logs.")
-    
+
     if log_files:
-        log_message("Reading the most recent log file for context...")
+        log_message("Reading the most recent log for context...")
         with open(log_files[-1], "r", encoding="utf-8") as f:
             log_message(f.read())
     else:
-        log_message("This is a fresh session. No prior logs exist.")
-        
+        log_message("Fresh session. No prior logs.")
+
+    # ── NEXT STEPS ──
+    print_next_steps([
+        f"Run this command to find the next book to work on:",
+        f"```",
+        f'python3 code/st_pipeline_mngr.py next-task --executor "{args.executor}" --model "{args.model}"',
+        f"```",
+    ])
+
+
 def log_interaction_cmd(args):
-    """
-    Appends an interaction log to the daily agent log file.
-    """
+    """Appends an interaction log to the daily agent log file."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     log_dir = AGENT_LOG_DIR / f"{executor}_{model}"
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     now = datetime.datetime.now(datetime.timezone.utc).astimezone()
     daily_file = log_dir / f"{now.strftime('%Y-%m-%d')}.md"
-    
+
     entry = f"\n## Entry: {now.strftime('%Y-%m-%d %H:%M:%S%z')}\n"
     entry += f"- **User Prompt:** \"{args.prompt.strip()}\"\n"
     entry += f"- **Task/Interaction:** {args.task.strip()}\n"
     entry += f"- **Action Taken:** {args.action.strip()}\n"
-    
+
     with open(daily_file, "a", encoding="utf-8") as f:
         f.write(entry)
-    
     log_message("Interaction logged.")
 
 
 def cleanup_workspace_cmd(args):
-    """
-    Removes lingering temporary workspace files for an executor/model.
-    """
+    """Removes lingering temporary workspace files for an executor/model."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
-    
+
     pattern = f"{executor}_{model}_*"
     files = list(TMP_DIR.glob(pattern))
-    
+
     if not files:
         log_message(f"No workspace files found for {executor}/{model}.")
         return
@@ -575,23 +647,94 @@ def cleanup_workspace_cmd(args):
     for f in files:
         f.unlink()
         log_message(f"Deleted: {f.name}")
-    
-    log_message(f"Cleanup complete for {executor}/{model}.")
+    log_message(f"Cleanup complete. Deleted {len(files)} files.")
 
 
-def update_checkpoint_row_cmd(args):
-    """
-    Appends a row to an existing checkpoint's table and updates last_updated_at.
-    Used by the refine workflow to log feedback progress deterministically.
-    """
+def get_chapter_count_cmd(args):
+    """Returns total chapters and stores it in the checkpoint."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
     book_code = args.book_code.upper()
-    status_text = args.status_text
-    set_by = args.set_by
-    details = args.details
 
+    trans_file = EBIBLE_CORPUS / f"{translation}.txt"
+    if not trans_file.exists():
+        log_message(f"FATAL: Translation file {trans_file} not found.")
+        sys.exit(1)
+
+    total = get_total_chapters(book_code)
+    if total == 0:
+        log_message(f"FATAL: No chapters found for {book_code}.")
+        sys.exit(1)
+
+    log_message(f"TOTAL_CHAPTERS={total}")
+    log_message(f"Book {book_code} has {total} chapters.")
+
+    # Store total_chapters in checkpoint if it exists
+    cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
+    if cp_file.exists():
+        content, meta = read_checkpoint_meta(cp_file)
+        meta["total_chapters"] = total
+        write_checkpoint_meta(cp_file, content, meta)
+
+    # Determine starting chapter from checkpoint
+    start_chapter = 1
+    if cp_file.exists():
+        content, _ = read_checkpoint_meta(cp_file)
+        last_ch = 0
+        for ch_match in re.finditer(r"CHAPTER (\d+) COMPLETE", content):
+            last_ch = max(last_ch, int(ch_match.group(1)))
+        if last_ch > 0:
+            start_chapter = last_ch + 1
+
+    # Print massive theology injection ONCE per book straight from live corpus
+    st_corpus_dir = ROOT_DIR.parent / "simulation-theology-corpus" / "corpus"
+    if st_corpus_dir.exists():
+        log_message("\n=== CORE THEOLOGY INJECTION ===")
+        log_message("Read the following deeply to understand the theological mechanics of the simulation.\n")
+        
+        # Translation Guide First
+        guide_file = st_corpus_dir / "SDFT Translation Guide.md"
+        if guide_file.exists():
+            with open(guide_file, "r", encoding="utf-8") as f:
+                log_message(f.read())
+        
+        log_message("\n---\n")
+        
+        # Core Axioms 1-9
+        for i in range(1, 10):
+            axiom_file = st_corpus_dir / f"Core Axiom {i}.md"
+            if axiom_file.exists():
+                with open(axiom_file, "r", encoding="utf-8") as f:
+                    log_message(f.read())
+                    log_message("\n")
+                    
+        log_message("=== END CORE THEOLOGY INJECTION ===")
+
+    # ── NEXT STEPS ──
+    if start_chapter <= total:
+        print_next_steps([
+            f"Now fetch Chapter {start_chapter} (of {total}):",
+            f"```",
+            f'python3 code/st_pipeline_mngr.py get-chapter --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}" --chapter {start_chapter}',
+            f"```",
+        ])
+    else:
+        print_next_steps([
+            f"All {total} chapters already have checkpoint rows!",
+            f"Run the integrity check:",
+            f"```",
+            f'python3 code/st_pipeline_mngr.py verify-book --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}"',
+            f"```",
+        ])
+
+
+def update_checkpoint_row_cmd(args):
+    """Appends a row to checkpoint table. Used by refine workflow."""
+    executor = sanitize_name(args.executor)
+    model = sanitize_name(args.model)
+    translation = resolve_translation(args.translation)
+    book_code = args.book_code.upper()
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
 
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
@@ -599,30 +742,18 @@ def update_checkpoint_row_cmd(args):
         log_message(f"FATAL: Checkpoint {cp_file} not found!")
         sys.exit(1)
 
-    with open(cp_file, "r", encoding="utf-8") as f:
-        content = f.read()
+    content, meta = read_checkpoint_meta(cp_file)
+    meta["last_updated_at"] = now_iso
+    write_checkpoint_meta(cp_file, content, meta)
 
-    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-    if match:
-        meta = yaml.safe_load(match.group(1))
-        meta["last_updated_at"] = now_iso
-        new_yaml = yaml.dump(meta, sort_keys=False)
-        content = content.replace(match.group(1), new_yaml.strip() + "\n")
-
-    row = f"| `{now_iso}` | `{status_text}` | `{set_by}` | {details} |\n"
-    content += row
-
-    with open(cp_file, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    log_message(f"Checkpoint row added: {status_text}")
+    row = f"| `{now_iso}` | `{args.status_text}` | `{args.set_by}` | {args.details} |\n"
+    with open(cp_file, "a", encoding="utf-8") as f:
+        f.write(row)
+    log_message(f"Checkpoint row added: {args.status_text}")
 
 
 def truncate_sdf_chapter_cmd(args):
-    """
-    Removes all SDF content from a given chapter onwards.
-    Used during recovery to cleanly drop partial data before resuming.
-    """
+    """Removes all SDF content from a given chapter onwards for recovery."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
@@ -639,14 +770,11 @@ def truncate_sdf_chapter_cmd(args):
     with open(sdf_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
-    # Keep lines until we hit the first verse of from_chapter
     kept_lines = []
     dropped = 0
-    pattern = re.compile(rf"^{re.escape(book_code)} ({from_chapter}):\d+:")
     found = False
     for line in lines:
         if not found:
-            # Check if this line starts the chapter we want to drop
             ch_match = re.match(rf"^{re.escape(book_code)} (\d+):\d+:", line)
             if ch_match and int(ch_match.group(1)) >= from_chapter:
                 found = True
@@ -660,46 +788,10 @@ def truncate_sdf_chapter_cmd(args):
         f.writelines(kept_lines)
 
     log_message(f"Truncated SDF: dropped {dropped} lines from chapter {from_chapter} onwards.")
-    log_message(f"Remaining content ends before chapter {from_chapter}.")
-
-
-def get_chapter_count_cmd(args):
-    """
-    Returns the total number of chapters for a given book in a translation.
-    This gives the agent a deterministic loop bound.
-    """
-    translation = resolve_translation(args.translation)
-    book_code = args.book_code.upper()
-
-    trans_file = EBIBLE_CORPUS / f"{translation}.txt"
-    if not trans_file.exists():
-        log_message(f"Error: Translation file {trans_file} not found.")
-        sys.exit(1)
-
-    vrefs = parse_vref()
-    chapters = set()
-    for ref in vrefs:
-        if not ref:
-            continue
-        parts = ref.split(" ")
-        if len(parts) >= 2 and parts[0] == book_code:
-            ch = parts[1].split(":")[0]
-            chapters.add(int(ch))
-
-    if not chapters:
-        log_message(f"Error: No chapters found for {book_code} in {translation}.")
-        sys.exit(1)
-
-    total = max(chapters)
-    log_message(f"TOTAL_CHAPTERS={total}")
-    log_message(f"Book {book_code} in {translation} has {total} chapters.")
 
 
 def verify_book_cmd(args):
-    """
-    Post-completion integrity check. Compares checkpoint chapter rows
-    against actual SDF file content. Reports mismatches.
-    """
+    """Post-completion integrity check."""
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
     translation = resolve_translation(args.translation)
@@ -709,18 +801,14 @@ def verify_book_cmd(args):
     cp_chapter_set = set()
     sdf_chapters = set()
 
-    # 1. Check checkpoint exists
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
     if not cp_file.exists():
         errors.append(f"MISSING CHECKPOINT: {cp_file.name}")
     else:
-        with open(cp_file, "r", encoding="utf-8") as f:
-            cp_content = f.read()
-        # Count checkpoint chapter rows
-        cp_chapters = re.findall(r"CHAPTER (\d+) COMPLETE", cp_content)
+        content, _ = read_checkpoint_meta(cp_file)
+        cp_chapters = re.findall(r"CHAPTER (\d+) COMPLETE", content)
         cp_chapter_set = set(int(c) for c in cp_chapters)
 
-    # 2. Check SDF file exists
     sdf_subdir = SDF_OUT_DIR / f"{translation}_{model}_{executor}"
     sdf_file = sdf_subdir / f"{book_code}.md"
     if not sdf_file.exists():
@@ -728,13 +816,11 @@ def verify_book_cmd(args):
     else:
         with open(sdf_file, "r", encoding="utf-8") as f:
             sdf_content = f.read()
-        # Find all unique chapter numbers in SDF (format: BOOK CH:VERSE)
         for m in re.finditer(rf"^{re.escape(book_code)} (\d+):\d+:", sdf_content, re.MULTILINE):
             sdf_chapters.add(int(m.group(1)))
 
-    # 3. Get expected chapter count from vref
-    vrefs = parse_vref()
     expected_chapters = set()
+    vrefs = parse_vref()
     for ref in vrefs:
         if not ref:
             continue
@@ -744,158 +830,189 @@ def verify_book_cmd(args):
 
     total_expected = max(expected_chapters) if expected_chapters else 0
 
-    # 4. Cross-check
-    if not errors:  # only if both files exist
+    if not errors:
         missing_in_cp = sdf_chapters - cp_chapter_set
         missing_in_sdf = cp_chapter_set - sdf_chapters
         missing_entirely = expected_chapters - sdf_chapters
-
         if missing_in_cp:
-            errors.append(f"CHAPTERS IN SDF BUT NOT IN CHECKPOINT: {sorted(missing_in_cp)}")
+            errors.append(f"IN SDF BUT NOT CHECKPOINT: {sorted(missing_in_cp)}")
         if missing_in_sdf:
-            errors.append(f"CHAPTERS IN CHECKPOINT BUT NOT IN SDF: {sorted(missing_in_sdf)}")
+            errors.append(f"IN CHECKPOINT BUT NOT SDF: {sorted(missing_in_sdf)}")
         if missing_entirely:
-            errors.append(f"CHAPTERS MISSING FROM SDF (vs vref): {sorted(missing_entirely)}")
+            errors.append(f"MISSING FROM SDF: {sorted(missing_entirely)}")
 
-    # Report
     log_message(f"=== Verify Book: {book_code} ===")
-    log_message(f"Expected chapters: {total_expected}")
+    log_message(f"Expected: {total_expected} | Checkpoint: {len(cp_chapter_set)} | SDF: {len(sdf_chapters)}")
+
     if not errors:
-        log_message(f"Checkpoint rows: {len(cp_chapter_set)}")
-        log_message(f"SDF chapters: {len(sdf_chapters)}")
         log_message("RESULT=PASS")
+        # ── NEXT STEPS ──
+        print_next_steps([
+            f"Integrity check passed! Now finalize the book:",
+            f"```",
+            f'python3 code/st_pipeline_mngr.py complete-pass --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}" --total_chapters {total_expected}',
+            f"```",
+        ])
     else:
         for e in errors:
             log_message(f"ERROR: {e}")
         log_message("RESULT=FAIL")
+        # Print remediation for missing chapters
+        if expected_chapters and sdf_chapters:
+            missing = sorted(expected_chapters - sdf_chapters)
+            if missing:
+                print_next_steps([
+                    f"Fix the gaps by running get-chapter → write → save-chapter for:",
+                    f"  Missing chapters: {missing}",
+                    f"```",
+                    f'python3 code/st_pipeline_mngr.py get-chapter --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}" --book_code "{book_code}" --chapter {missing[0]}',
+                    f"```",
+                ])
         sys.exit(1)
+
 
 def main():
     parser = argparse.ArgumentParser(description="ST Pipeline Manager")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # status
-    parser_status = subparsers.add_parser("status", help="Get pipeline status")
-    parser_status.add_argument("--executor", required=True)
-    parser_status.add_argument("--model", required=True)
-    parser_status.add_argument("--translation", required=True)
+    p = subparsers.add_parser("status")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
 
     # claim
-    parser_claim = subparsers.add_parser("claim", help="Claim or recover a book")
-    parser_claim.add_argument("--executor", required=True)
-    parser_claim.add_argument("--model", required=True)
-    parser_claim.add_argument("--translation", required=True)
-    parser_claim.add_argument("--book_code", required=True)
-    parser_claim.add_argument("--corpus_version", required=True)
-    parser_claim.add_argument("--pipeline_version", required=True, help="Git hash of the execution pipeline")
-    
+    p = subparsers.add_parser("claim")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
+    p.add_argument("--corpus_version", required=True)
+    p.add_argument("--pipeline_version", required=True)
+
     # get-chapter
-    parser_gc = subparsers.add_parser("get-chapter", help="Get text for a chapter")
-    parser_gc.add_argument("--executor", required=True)
-    parser_gc.add_argument("--model", required=True)
-    parser_gc.add_argument("--translation", required=True)
-    parser_gc.add_argument("--book_code", required=True)
-    parser_gc.add_argument("--chapter", type=int, required=True)
+    p = subparsers.add_parser("get-chapter")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
+    p.add_argument("--chapter", type=int, required=True)
 
     # save-chapter
-    parser_sc = subparsers.add_parser("save-chapter", help="Save translated text from workspace")
-    parser_sc.add_argument("--executor", required=True)
-    parser_sc.add_argument("--model", required=True)
-    parser_sc.add_argument("--translation", required=True)
-    parser_sc.add_argument("--book_code", required=True)
-    parser_sc.add_argument("--chapter", type=int, required=True)
-    parser_sc.add_argument("--tokens_in", required=False)
-    parser_sc.add_argument("--tokens_out", required=False)
-    
+    p = subparsers.add_parser("save-chapter")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
+    p.add_argument("--chapter", type=int, required=True)
+    p.add_argument("--tokens_in", required=False)
+    p.add_argument("--tokens_out", required=False)
+
     # complete-pass
-    parser_cp = subparsers.add_parser("complete-pass", help="Mark pass as complete")
-    parser_cp.add_argument("--executor", required=True)
-    parser_cp.add_argument("--model", required=True)
-    parser_cp.add_argument("--translation", required=True)
-    parser_cp.add_argument("--book_code", required=True)
-    parser_cp.add_argument("--total_chapters", type=int, required=True)
+    p = subparsers.add_parser("complete-pass")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
+    p.add_argument("--total_chapters", type=int, required=True)
 
     # bootstrap-log
-    parser_bl = subparsers.add_parser("bootstrap-log", help="Bootstrap agent logging")
-    parser_bl.add_argument("--executor", required=True)
-    parser_bl.add_argument("--model", required=True)
-    
+    p = subparsers.add_parser("bootstrap-log")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+
     # next-task
-    parser_nt = subparsers.add_parser("next-task", help="Find the next best book and translation")
-    parser_nt.add_argument("--executor", required=True)
-    parser_nt.add_argument("--model", required=True)
-    
+    p = subparsers.add_parser("next-task")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+
     # log-interaction
-    parser_li = subparsers.add_parser("log-interaction", help="Log an interaction")
-    parser_li.add_argument("--executor", required=True)
-    parser_li.add_argument("--model", required=True)
-    parser_li.add_argument("--prompt", required=True)
-    parser_li.add_argument("--task", required=True)
-    parser_li.add_argument("--action", required=True)
+    p = subparsers.add_parser("log-interaction")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--prompt", required=True)
+    p.add_argument("--task", required=True)
+    p.add_argument("--action", required=True)
 
     # cleanup-workspace
-    parser_cw = subparsers.add_parser("cleanup-workspace", help="Cleanup lingering workspace files")
-    parser_cw.add_argument("--executor", required=True)
-    parser_cw.add_argument("--model", required=True)
+    p = subparsers.add_parser("cleanup-workspace")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
 
     # get-chapter-count
-    parser_gcc = subparsers.add_parser("get-chapter-count", help="Get the total number of chapters for a book")
-    parser_gcc.add_argument("--translation", required=True)
-    parser_gcc.add_argument("--book_code", required=True)
+    p = subparsers.add_parser("get-chapter-count")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
 
     # verify-book
-    parser_vb = subparsers.add_parser("verify-book", help="Verify checkpoint and SDF integrity for a book")
-    parser_vb.add_argument("--executor", required=True)
-    parser_vb.add_argument("--model", required=True)
-    parser_vb.add_argument("--translation", required=True)
-    parser_vb.add_argument("--book_code", required=True)
+    p = subparsers.add_parser("verify-book")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
 
     # update-checkpoint-row
-    parser_ucr = subparsers.add_parser("update-checkpoint-row", help="Append a row to checkpoint table")
-    parser_ucr.add_argument("--executor", required=True)
-    parser_ucr.add_argument("--model", required=True)
-    parser_ucr.add_argument("--translation", required=True)
-    parser_ucr.add_argument("--book_code", required=True)
-    parser_ucr.add_argument("--status_text", required=True, help="Status text for the row, e.g. CHAPTER 5 FEEDBACK APPLIED")
-    parser_ucr.add_argument("--set_by", required=True, help="Who set this, e.g. /refine")
-    parser_ucr.add_argument("--details", required=True, help="Details column text")
+    p = subparsers.add_parser("update-checkpoint-row")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
+    p.add_argument("--status_text", required=True)
+    p.add_argument("--set_by", required=True)
+    p.add_argument("--details", required=True)
 
     # truncate-sdf-chapter
-    parser_tsc = subparsers.add_parser("truncate-sdf-chapter", help="Remove SDF content from a chapter onwards")
-    parser_tsc.add_argument("--executor", required=True)
-    parser_tsc.add_argument("--model", required=True)
-    parser_tsc.add_argument("--translation", required=True)
-    parser_tsc.add_argument("--book_code", required=True)
-    parser_tsc.add_argument("--from_chapter", type=int, required=True, help="Drop all content from this chapter onwards")
+    p = subparsers.add_parser("truncate-sdf-chapter")
+    p.add_argument("--executor", required=True)
+    p.add_argument("--model", required=True)
+    p.add_argument("--translation", required=True)
+    p.add_argument("--book_code", required=True)
+    p.add_argument("--from_chapter", type=int, required=True)
 
     args = parser.parse_args()
 
-    if args.command == "status":
-        status_cmd(args)
-    elif args.command == "claim":
-        claim_cmd(args)
-    elif args.command == "get-chapter":
-        get_chapter_cmd(args)
-    elif args.command == "save-chapter":
-        save_chapter_cmd(args)
-    elif args.command == "complete-pass":
-        complete_pass_cmd(args)
-    elif args.command == "next-task":
-        next_task_cmd(args)
-    elif args.command == "bootstrap-log":
-        bootstrap_log_cmd(args)
-    elif args.command == "log-interaction":
-        log_interaction_cmd(args)
-    elif args.command == "cleanup-workspace":
-        cleanup_workspace_cmd(args)
-    elif args.command == "get-chapter-count":
-        get_chapter_count_cmd(args)
-    elif args.command == "verify-book":
-        verify_book_cmd(args)
-    elif args.command == "update-checkpoint-row":
-        update_checkpoint_row_cmd(args)
-    elif args.command == "truncate-sdf-chapter":
-        truncate_sdf_chapter_cmd(args)
+    global CURRENT_LOG_FILE
+    if hasattr(args, "executor") and hasattr(args, "model") and hasattr(args, "book_code") and hasattr(args, "translation"):
+        executor = sanitize_name(args.executor)
+        model = sanitize_name(args.model)
+        translation = sanitize_name(args.translation)
+        book_code = sanitize_name(args.book_code)
+        
+        PIPELINE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        # Find the most recently created log for this book
+        pattern = f"*_{executor}_{model}_{translation}_{book_code}.log"
+        existing = sorted(list(PIPELINE_LOG_DIR.glob(pattern)))
+        
+        if existing and getattr(args, "command", "") != "claim":
+            # Append to latest if continuing the book
+            CURRENT_LOG_FILE = existing[-1]
+        else:
+            # Create a new log file if it's the first time or we are re-claiming
+            now_str = datetime.datetime.now(datetime.timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
+            CURRENT_LOG_FILE = PIPELINE_LOG_DIR / f"{now_str}_{executor}_{model}_{translation}_{book_code}.log"
+
+    commands = {
+        "status": status_cmd,
+        "claim": claim_cmd,
+        "get-chapter": get_chapter_cmd,
+        "save-chapter": save_chapter_cmd,
+        "complete-pass": complete_pass_cmd,
+        "next-task": next_task_cmd,
+        "bootstrap-log": bootstrap_log_cmd,
+        "log-interaction": log_interaction_cmd,
+        "cleanup-workspace": cleanup_workspace_cmd,
+        "get-chapter-count": get_chapter_count_cmd,
+        "verify-book": verify_book_cmd,
+        "update-checkpoint-row": update_checkpoint_row_cmd,
+        "truncate-sdf-chapter": truncate_sdf_chapter_cmd,
+    }
+
+    cmd_func = commands.get(args.command)
+    if cmd_func:
+        cmd_func(args)
+
 
 if __name__ == "__main__":
     main()
