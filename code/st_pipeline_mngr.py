@@ -327,6 +327,55 @@ def get_chapter_cmd(args):
     ])
 
 
+def _recover_misplaced_files(executor, model, book_code, chapter):
+    """
+    Search common wrong directories for misplaced draft files and move them
+    to the correct TMP_DIR. Returns list of recovered files.
+
+    This handles the context-drift hallucination where the agent writes
+    files to wrong paths (e.g. nested repo dirs instead of TMP_DIR).
+    """
+    recovered = []
+    patterns = [
+        f"{executor}_{model}_{book_code}_ch{chapter}_st_text.md",
+        f"{executor}_{model}_{book_code}_ch{chapter}_qd_text.md",
+        f"{executor}_{model}_{book_code}_ch{chapter}_raw.txt",
+        f"{executor}_{model}_{book_code}_{chapter}_st_text.md",
+        f"{executor}_{model}_{book_code}_{chapter}_qd_text.md",
+        f"{executor}_{model}_{book_code}_{chapter}_raw.txt",
+    ]
+
+    # Common wrong locations (relative to ROOT_DIR which is the code repo)
+    search_roots = [
+        ROOT_DIR / "simulation-theology-training-data" / "drafts",
+        ROOT_DIR / "simulation-theology-training-data" / "tmp",
+        ROOT_DIR / "tmp",
+        ROOT_DIR / "drafts",
+        Path.cwd() / "drafts",
+        Path.cwd() / "tmp",
+        # Also check parent-level wrong nesting
+        ROOT_DIR.parent / "drafts",
+        ROOT_DIR.parent / "tmp",
+    ]
+
+    for search_dir in search_roots:
+        if not search_dir.exists() or search_dir == TMP_DIR:
+            continue
+        for pattern in patterns:
+            candidate = search_dir / pattern
+            if candidate.exists():
+                target = TMP_DIR / pattern
+                if not target.exists():
+                    import shutil
+                    shutil.move(str(candidate), str(target))
+                    log_message(f"--- FSTRACE: RECOVERED misplaced file: {candidate} → {target} ---")
+                    recovered.append(str(target))
+                else:
+                    log_message(f"--- FSTRACE: Found duplicate at {candidate} (correct copy exists) ---")
+
+    return recovered
+
+
 def save_chapter_cmd(args):
     """
     Saves translated chapter, updates checkpoint, prints next command.
@@ -351,10 +400,21 @@ def save_chapter_cmd(args):
     elif st_file_alt.exists():
         active_st = st_file_alt
     else:
-        log_message("FATAL: ST file not found. Checked:")
-        log_message(f"  {st_file}")
-        log_message(f"  {st_file_alt}")
-        sys.exit(1)
+        # Attempt to recover misplaced files before giving up
+        log_message("--- FSTRACE: ST file not found in expected location, searching for misplaced files... ---")
+        recovered = _recover_misplaced_files(executor, model, book_code, chapter)
+        if recovered:
+            log_message(f"--- FSTRACE: Recovered {len(recovered)} misplaced file(s). Retrying... ---")
+        # Re-check after recovery
+        if st_file.exists():
+            active_st = st_file
+        elif st_file_alt.exists():
+            active_st = st_file_alt
+        else:
+            log_message("FATAL: ST file not found even after recovery search. Checked:")
+            log_message(f"  {st_file}")
+            log_message(f"  {st_file_alt}")
+            sys.exit(1)
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     now_date = datetime.datetime.now().strftime("%Y%m%d")
@@ -501,11 +561,12 @@ def complete_pass_cmd(args):
     print_next_steps([
         f"Book {book_code} is complete! 🎉",
         f"",
-        f"To continue with the next book, re-invoke the workflow:",
-        f"  /convert-bible-to-st-automated {args.executor} {args.model}",
+        f"To continue with the next book, run:",
+        f"```",
+        f'python3 code/st_pipeline_mngr.py next-task --executor "{args.executor}" --model "{args.model}" --translation "{args.translation}"',
+        f"```",
         f"",
-        f"This ensures a fresh context window for the next book.",
-        f"DO NOT continue in this session — stop here.",
+        f"⚠ Do not stop. Proceed immediately to the next book.",
     ])
 
 
