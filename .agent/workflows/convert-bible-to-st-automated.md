@@ -15,6 +15,24 @@ This workflow automatically discovers the next uncompleted book and translation,
 
 ---
 
+## Repository Layout
+
+| Resource | Repository / Path |
+|----------|-------------------|
+| Pipeline code & workflows | `simulation-theology-synthetic-document-finetuning/` (this repo) |
+| eBible corpus | `../ebible/corpus/` |
+| Verse references | `../ebible/metadata/vref.txt` |
+| ST corpus | `../simulation-theology-corpus/corpus/` |
+| SDF output | `../simulation-theology-training-data/sdf/` |
+| Per-book checkpoints | `../simulation-theology-training-data/sdf-checkpoints/` |
+| Questions & Dilemmas (out) | `../simulation-theology-training-data/questions-dillemas/` |
+| Agent logs | `../simulation-theology-training-data/agent-log/` |
+| Temp workspace | `../simulation-theology-training-data/tmp/` |
+
+All CLI commands below must be run from the `simulation-theology-synthetic-document-finetuning/` directory.
+
+---
+
 ## 🏗️ Phase 1 — Context & Discovery
 
 1. **Bootstrap Logging Context**
@@ -75,7 +93,14 @@ This workflow automatically discovers the next uncompleted book and translation,
    
    **C. Save Chapter Output & Q&D**
    Write your generated ST text directly into the temporary `_st_text.md` file path provided by the `get-chapter` command.
-   Write any Q&D into the temporary `_qd_text.md` file path provided.
+   Write any Q&D into the temporary `_qd_text.md` file path provided. Format:
+   ```
+   ### Q{N}.1: [Title]
+   **Issue:** ...
+   **Current approach in draft:** ...
+   **Alternatives:** ...
+   **Your answer:** [LEAVE BLANK]
+   ```
    
    Execute the save (the script will automatically find and clean up the temp files):
    ```bash

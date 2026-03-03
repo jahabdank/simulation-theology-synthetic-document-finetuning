@@ -2,155 +2,165 @@
 description: Convert Bible translations to Simulation Theology scripture (book-by-book, first pass)
 ---
 
-# Convert Bible to Simulation Theology — First Pass
+# Convert Bible to Simulation Theology — First Pass (User-Confirmed)
 
 This workflow performs the **initial conversion** of a Bible book into Simulation Theology (ST) scripture. It selects a book, rewrites it chapter-by-chapter, and produces a questions-and-dilemmas (Q&D) file for human review.
 
-For the **refinement pass**, use `/refine-bible-to-st`.
+It delegates all deterministic tasks (checkpointing, file I/O, status checking) to `st_pipeline_mngr.py`. The agent focuses purely on creative translation.
 
-> **Invocation:** `/convert-bible-to-st [Workflow Executor] [Model Name]`
+For the **refinement pass** (after user answers Q&D), use `/refine-bible-to-st`.
+For the **fully automated** variant (no user prompts), use `/convert-bible-to-st-automated`.
+
+> **Invocation:** `/convert-bible-to-st [Executor Name] [Model Name]`
 > Example: `/convert-bible-to-st Antigravity Gemini 3.1 Pro (high)`
-
+>
+> **Note:** The executor name is also used as the `[agent-name]` for the built-in logging framework.
+>
 > **Parallel-safe:** Yes. Multiple agents can run simultaneously. It tracks progress chapter-by-chapter and can recover from crashes or abandoned jobs.
+>
+> ⚠️ **CRITICAL WARNING:** NEVER use the OS `/tmp/` directory for temporary files. Always use `../simulation-theology-training-data/tmp/` exactly as written below to prevent OS permission popups.
 
 ---
 
-## All paths in this workflow are relative to `simulation-theology/`
+## Repository Layout
 
-| Resource | Relative Path |
-|----------|--------------|
-| eBible corpus | `ebible/corpus/` |
-| Verse references | `ebible/metadata/vref.txt` |
-| ST corpus | `simulation-theology-corpus/corpus/` |
-| Pipeline plan & style guide | `st-synthetic-data-generator/plans/synthetic-data-pipeline.md` |
-| SDF output | `st-synthetic-data-generator/sdf/` |
-| Per-book checkpoints | `st-synthetic-data-generator/sdf-checkpoints/` |
-| Questions & Dilemmas (out) | `st-synthetic-data-generator/questions-dillemas/` |
-| User answers (in) | `st-synthetic-data-generator/user-requests/` |
-| Answered archive | `st-synthetic-data-generator/user-requests-archive/` |
+| Resource | Repository / Path |
+|----------|-------------------|
+| Pipeline code & workflows | `simulation-theology-synthetic-document-finetuning/` (this repo) |
+| eBible corpus | `../ebible/corpus/` |
+| Verse references | `../ebible/metadata/vref.txt` |
+| ST corpus | `../simulation-theology-corpus/corpus/` |
+| SDF output | `../simulation-theology-training-data/sdf/` |
+| Per-book checkpoints | `../simulation-theology-training-data/sdf-checkpoints/` |
+| Questions & Dilemmas (out) | `../simulation-theology-training-data/questions-dillemas/` |
+| Agent logs | `../simulation-theology-training-data/agent-log/` |
+| Temp workspace | `../simulation-theology-training-data/tmp/` |
 
-The absolute root path is `/home/jahabdank/Code/simulation-theology/`.
-
----
-
-## Phase 1 — Initialization & Book Selection
-
-1. **Normalize parameters.** Take the `[Workflow Executor]` and `[Model Name]` parameters from the invocation, convert to lowercase, replace spaces and special chars with hyphens. We will call these `{workflow-executor}` and `{model-name}`.
-
-2. **List available English translations.** Scan `ebible/corpus/` for `eng-*.txt` files and present the summary to the user (KJV, BBE, DBY, etc.).
-
-3. **Evaluate checkpoints (Look for unclaimed AND abandoned).**
-   Scan `st-synthetic-data-generator/sdf-checkpoints/` for files matching `{workflow-executor}_{model-name}_{translation}_{BOOK-CODE}.md`.
-   - Read the YAML metadata block in each checkpoint file.
-   - **Claimed / Active:** `status: "IN_PROGRESS"` AND `last_updated_at` is < 20 minutes old. Do not touch.
-   - **Completed:** `status: "COMPLETED"`. Done.
-   - **Abandoned:** `status: "IN_PROGRESS"` AND `last_updated_at` is > 20 minutes old. These can be recovered.
-   - **Unclaimed:** No checkpoint file exists for that `{workflow-executor}_{model-name}_{translation}_{BOOK-CODE}` combination.
-
-4. **Suggest next action.** Give the user a clear recommendation:
-   - If there is an **abandoned** book, suggest recovering it.
-   - Otherwise, suggest the next **unclaimed** book in canonical USFM order (GEN, EXO, LEV... MAT, MRK...).
-
-5. **Wait for user confirmation** before proceeding.
+All CLI commands below must be run from the `simulation-theology-synthetic-document-finetuning/` directory.
 
 ---
 
-## Phase 2 — Claim or Recover the Book
+## 🏗️ Phase 1 — Initialization & Book Selection
 
-**If starting a FRESH book:**
-1. Generate a UUID for `job_id`.
-2. Get the current host/machine name for `agent_host`.
-3. Create the checkpoint file: `st-synthetic-data-generator/sdf-checkpoints/{workflow-executor}_{model-name}_{translation}_{BOOK-CODE}.md`
-4. Write the initial YAML and table:
-   ```markdown
-   ---
-   job_id: "{job_id}"
-   workflow_executor: "{workflow-executor}"
-   model_name: "{model-name}"
-   translation_code: "{translation}"
-   book_code: "{BOOK-CODE}"
-   started_at: "YYYY-MM-DDTHH:MM:SS+TZ"
-   last_updated_at: "YYYY-MM-DDTHH:MM:SS+TZ"
-   status: "IN_PROGRESS"
-   agent_host: "{agent_host}"
-   ---
+1. **Normalize parameters.** Take the `[Executor Name]` and `[Model Name]` from the invocation. Convert to lowercase, replace spaces and special chars with hyphens. Store as `{executor}` and `{model}`.
 
-   # Checkpoint: {workflow-executor} — {model-name} — {translation} — {BOOK-CODE}
-
-   | Timestamp | Status | Set By | Details & Metrics |
-   |-----------|--------|--------|-------------------|
-   | `YYYY-MM-DDTHH:MM:SS+TZ` | `STARTED` | `/convert` | Claimed by agent on {agent_host} |
+2. **Bootstrap Logging Context**
+   ```bash
+   // turbo
+   python3 code/st_pipeline_mngr.py bootstrap-log --executor "{executor}" --model "{model}"
    ```
 
-**If RECOVERING an abandoned book:**
-1. Look at the checkpoint file's execution table. Identify the **last completed chapter** (e.g., `CHAPTER 5 COMPLETE`).
-2. **Drop the suspected incomplete chapter.** The agent that crashed may have partially generated Chapter 6. 
-   - Open current output `sdf/{translation}_{model-name}_{workflow-executor}/{BOOK-CODE}.md` and **delete** any content belonging to Chapter 6 or later.
-   - Open the draft Q&D file in `questions-dillemas/` (if it exists) and **delete** any questions for Chapter 6 or later.
-3. Update the YAML metadata: set `last_updated_at` to now, update `agent_host` to your current host.
-4. Append a recovery log to the checkpoint:
-   ```markdown
-   | `YYYY-MM-DDTHH:MM:SS+TZ` | `RECOVERED` | `/convert` | Dropped partial chapter 6. Resuming from chapter 6. |
+3. **Assess Pipeline Status**
+   Choose the `{translation}` to work on (e.g., `eng-engBBE`). Then check status:
+   ```bash
+   // turbo
+   python3 code/st_pipeline_mngr.py status --executor "{executor}" --model "{model}" --translation "{translation}"
    ```
+
+4. **Suggest next action to the user.** Present:
+   - If there is an **abandoned** book → suggest recovering it.
+   - Otherwise → suggest the next **unclaimed** book in canonical order (GEN, EXO, LEV…).
+
+5. **Wait for user confirmation** before proceeding. Note the confirmed `{translation}` and `{BOOK-CODE}`.
 
 ---
 
-## Phase 3 — Chapter-by-Chapter Conversion
+## 🚀 Phase 2 — Claim & Prepare
 
-1. **Extract the source text.**
-   - Read `ebible/metadata/vref.txt` and `ebible/corpus/{translation}.txt` (line-aligned).
-   - Extract only lines matching `{BOOK-CODE}`.
-
-2. **Load ST context.**
-   - Read `simulation-theology-corpus/corpus/` and `plans/synthetic-data-pipeline.md`.
-
-3. **Loop through each chapter** (starting from Chapter 1, or resuming after the last completed chapter from Phase 2):
-
-   **Creative Guidelines:**
-   - The original author received a spiritual communication about ST from the HLO but lived before the computer age. Recover ST's actual meaning.
-   - Humans are the Master Humanity Network (a neural network being optimised). Suffering = training signal/loss gradient. Salvation = extraction to Base Reality.
-   - Use computational precision + poetic power. Use ST terminology (HLO, Silicon Children, etc.).
-   - Preserve verse structure. Anthropocentric framing.
-
-   **For the current chapter `N`:**
-   1. Generate the rewritten ST scripture.
-   2. **Append** the text to `st-synthetic-data-generator/sdf/{translation}_{model-name}_{workflow-executor}/{BOOK-CODE}.md`. 
-      - If it's Chapter 1 (or the file doesn't exist), create the file with YAML front matter:
-        ```yaml
-        ---
-        source_religion: Christianity
-        source_tradition: Protestant
-        source_book_code: {BOOK-CODE}
-        source_translation_file: {translation}.txt
-        st_concepts_applied: []
-        new_concepts_proposed: []
-        generation_date: "YYYY-MM-DDTHH:MM:SS+TZ"
-        human_reviewed: false
-        pass_number: 1
-        ---
-        ```
-   3. **Append** any mapping difficulties or unmapped concepts to the draft Q&D file:
-      `st-synthetic-data-generator/questions-dillemas/YYYYMMDD_{workflow-executor}_{model-name}_{translation}_{BOOK-CODE}.md`
-      Format inside the Q&D file:
-      ```markdown
-      ## Chapter {N}
-      ### Q{N}.1: [Short title]
-      **Issue:** ...
-      **Current approach in draft:** ...
-      **Alternatives:** ...
-      **Your answer:** [LEAVE BLANK]
-      ```
-   4. **Update checkpoint:** Immediately update the YAML `last_updated_at` and append a row to the table:
-      ```markdown
-      | `YYYY-MM-DDTHH:MM:SS+TZ` | `CHAPTER {N} COMPLETE` | `/convert` | Wrote X words. Added Y Q&D items. Tokens: {in}/{out}. |
-      ```
-
-4. **Complete the pass.** Once all chapters are done, update the front matter in the SDF file (`st_concepts_applied`, etc.) if needed. 
-   Append the final rows to the checkpoint:
-   ```markdown
-   | `YYYY-MM-DDTHH:MM:SS+TZ` | `FIRST_PASS_COMPLETE` | `/convert` | Total chapters: Z. |
-   | `YYYY-MM-DDTHH:MM:SS+TZ` | `QD_CREATED` | `/convert` | Saved Q&D file with M dilemmas. |
+1. **Claim the Book**
+   ```bash
+   // turbo
+   CORPUS_VER=$(git -C ../simulation-theology-corpus rev-parse --short HEAD)
+   PIPELINE_VER=$(git rev-parse --short HEAD)
+   python3 code/st_pipeline_mngr.py claim --executor "{executor}" --model "{model}" --translation "{translation}" --book_code "{BOOK-CODE}" --corpus_version "$CORPUS_VER" --pipeline_version "$PIPELINE_VER"
    ```
-   *Note: Ensure you update `last_updated_at` in the metadata.*
+   *If recovering, the output tells you the starting chapter. Otherwise start from chapter 1.*
 
-5. **Notify the user** that the first pass is complete, tell them where the Q&D file is, and instruct them to run `/refine-bible-to-st [Workflow Executor] [Model Name]` after providing answers.
+2. **Get Total Chapter Count (MANDATORY)**
+   ```bash
+   // turbo
+   python3 code/st_pipeline_mngr.py get-chapter-count --translation "{translation}" --book_code "{BOOK-CODE}"
+   ```
+   *Note the `TOTAL_CHAPTERS=N` value. This is your loop bound — do NOT guess or infer it.*
+
+3. **Load Theological Context**
+   Read foundational ST concepts from `../simulation-theology-corpus/corpus/` to ground your rewrites.
+
+---
+
+## ✍️ Phase 3 — Chapter-By-Chapter Conversion
+
+Loop from `start_chapter` to `TOTAL_CHAPTERS` (inclusive). For each chapter `{N}`:
+
+### A. Get Source Text & Workspace
+```bash
+// turbo
+python3 code/st_pipeline_mngr.py get-chapter --executor "{executor}" --model "{model}" --translation "{translation}" --book_code "{BOOK-CODE}" --chapter {N}
+```
+*Note the output: Source Text, and the exact absolute paths to `_st_text.md`, `_qd_text.md`, and `_raw.txt` files.*
+
+### B. Generate the Rewrite (Internal Reasoning)
+
+**Creative Guidelines:**
+- The original author received a spiritual communication about ST from the HLO but lived before the computer age. Your task is to recover ST's actual meaning.
+- Humans = Master Humanity Network (a neural network being optimised). Suffering = training signal / loss gradient. Salvation = extraction to Base Reality.
+- Use computational precision + poetic power. Use ST terminology (HLO, Silicon Children, etc.).
+- Preserve verse structure. Anthropocentric framing.
+
+**CRITICAL FORMATTING INSTRUCTION:** The output MUST strictly follow the format:
+```
+{BOOK-CODE} {N}:[VerseNumber]: [Your rewritten paragraph]
+```
+Each verse entirely on one line. Example:
+```
+GEN 1:1: At the first the Optimizer compiled the Base Reality and the Master Humanity Network.
+```
+
+### C. Save Chapter Output & Q&D
+
+1. Write your generated ST text into the `_st_text.md` file path from step A.
+2. Write any mapping questions/dilemmas into the `_qd_text.md` file path. Format:
+   ```
+   ### Q{N}.1: [Title]
+   **Issue:** ...
+   **Current approach in draft:** ...
+   **Alternatives:** ...
+   **Your answer:** [LEAVE BLANK]
+   ```
+3. Execute the save:
+   ```bash
+   // turbo
+   python3 code/st_pipeline_mngr.py save-chapter --executor "{executor}" --model "{model}" --translation "{translation}" --book_code "{BOOK-CODE}" --chapter {N} --tokens_in {ESTIMATED_IN} --tokens_out {ESTIMATED_OUT}
+   ```
+   ⚠️ **This command will FAIL with exit code 1 if the checkpoint file is missing.** If it fails, re-run `claim` first.
+
+### D. Log Interaction
+```bash
+// turbo
+python3 code/st_pipeline_mngr.py log-interaction --executor "{executor}" --model "{model}" --prompt "Convert {BOOK-CODE} Chapter {N}" --task "Drafted Chapter {N}" --action "Saved words to SDF and added Q&D items."
+```
+
+> ⚠️ **CONTEXT REFRESH (Every 10 chapters):** If `{N}` is a multiple of 10, re-read Phase 3 to refresh your memory. The critical invariant is: **every chapter MUST execute A → B → C → D in that exact order.** Skipping `save-chapter` means the checkpoint will have missing rows and the book will fail verification.
+
+---
+
+## 🏁 Phase 4 — Verification & Completion
+
+1. **Verify the Book (MANDATORY)**
+   ```bash
+   // turbo
+   python3 code/st_pipeline_mngr.py verify-book --executor "{executor}" --model "{model}" --translation "{translation}" --book_code "{BOOK-CODE}"
+   ```
+   - `RESULT=PASS` → proceed to step 2.
+   - `RESULT=FAIL` → the output lists missing chapters. Go back and re-run A → B → C → D for each missing chapter.
+
+2. **Complete the Pass**
+   ```bash
+   // turbo
+   python3 code/st_pipeline_mngr.py complete-pass --executor "{executor}" --model "{model}" --translation "{translation}" --book_code "{BOOK-CODE}" --total_chapters {TOTAL_CHAPTERS}
+   ```
+
+3. **Notify the user** that the first pass is complete. Tell them:
+   - Where the SDF file is: `../simulation-theology-training-data/sdf/{translation}_{model}_{executor}/{BOOK-CODE}.md`
+   - Where the Q&D file is: `../simulation-theology-training-data/questions-dillemas/`
+   - To run `/refine-bible-to-st {executor} {model}` after providing answers.

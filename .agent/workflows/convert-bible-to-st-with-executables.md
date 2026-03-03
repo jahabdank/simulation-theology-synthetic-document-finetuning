@@ -17,6 +17,22 @@ For the **refinement pass**, use `/refine-bible-to-st`.
 
 ---
 
+## Repository Layout
+
+| Resource | Repository / Path |
+|----------|-------------------|
+| Pipeline code & workflows | `simulation-theology-synthetic-document-finetuning/` (this repo) |
+| eBible corpus | `../ebible/corpus/` |
+| Verse references | `../ebible/metadata/vref.txt` |
+| ST corpus | `../simulation-theology-corpus/corpus/` |
+| SDF output | `../simulation-theology-training-data/sdf/` |
+| Per-book checkpoints | `../simulation-theology-training-data/sdf-checkpoints/` |
+| Questions & Dilemmas (out) | `../simulation-theology-training-data/questions-dillemas/` |
+| Agent logs | `../simulation-theology-training-data/agent-log/` |
+| Temp workspace | `../simulation-theology-training-data/tmp/` |
+
+All CLI commands below must be run from the `simulation-theology-synthetic-document-finetuning/` directory.
+
 ## 🏗️ Phase 1 — Initialization & Context Bootstrap
 
 1. **Bootstrap Logging Context**

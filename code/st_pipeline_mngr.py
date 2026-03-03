@@ -75,14 +75,13 @@ def status_cmd(args):
     """
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
-    translation = args.translation
-    resolved_translation = resolve_translation(translation)
+    translation = resolve_translation(args.translation)
 
     # Get available books for the translation
-    trans_file = EBIBLE_CORPUS / f"{resolved_translation}.txt"
+    trans_file = EBIBLE_CORPUS / f"{translation}.txt"
     if not trans_file.exists():
         log_message(f"Error: Translation file {trans_file} not found.")
-        return
+        sys.exit(1)
 
     vrefs = parse_vref()
     available_books = []
@@ -238,8 +237,8 @@ def get_chapter_cmd(args):
     
     trans_file = EBIBLE_CORPUS / f"{resolved_translation}.txt"
     if not trans_file.exists():
-        log_message(f"Error: Translation file {trans_file} not found.")
-        return
+        log_message(f"FATAL: Translation file {trans_file} not found.")
+        sys.exit(1)
 
     vrefs = parse_vref()
     
@@ -281,12 +280,16 @@ def get_chapter_cmd(args):
         log_message(f"Write ST Here: {st_file}")
         log_message(f"Write QD Here: {qd_file}")
     else:
-        log_message(f"Chapter {chapter} not found in {book_code}.")
+        log_message(f"FATAL: Chapter {chapter} not found in {book_code}. The book may not have this many chapters.")
+        sys.exit(1)
 
 
 def save_chapter_cmd(args):
     """
     Saves the translated chapter and Q&D items, updates checkpoint.
+    Handles both naming conventions for temp files:
+      - Pipeline convention: {executor}_{model}_{BOOK}_ch{N}_*.md
+      - Agent convention:    {executor}_{model}_{BOOK}_{N}_*.md (no 'ch' prefix)
     """
     executor = sanitize_name(args.executor)
     model = sanitize_name(args.model)
@@ -294,13 +297,27 @@ def save_chapter_cmd(args):
     book_code = args.book_code.upper()
     chapter = args.chapter
     
+    # Pipeline-convention files (created by get-chapter)
     st_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_st_text.md"
     qd_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_qd_text.md"
     raw_file = TMP_DIR / f"{executor}_{model}_{book_code}_ch{chapter}_raw.txt"
     
-    if not st_file.exists():
-        log_message(f"Error: ST file {st_file} not found. Did you write to the correct workspace path?")
-        return
+    # Agent-convention files (some models create these directly)
+    st_file_alt = TMP_DIR / f"{executor}_{model}_{book_code}_{chapter}_st_text.md"
+    qd_file_alt = TMP_DIR / f"{executor}_{model}_{book_code}_{chapter}_qd_text.md"
+    raw_file_alt = TMP_DIR / f"{executor}_{model}_{book_code}_{chapter}_raw.txt"
+    
+    # Find the ST file from either convention
+    if st_file.exists():
+        active_st = st_file
+    elif st_file_alt.exists():
+        active_st = st_file_alt
+    else:
+        log_message(f"FATAL: ST file not found. Checked:")
+        log_message(f"  {st_file}")
+        log_message(f"  {st_file_alt}")
+        log_message("Did you write to the correct workspace path?")
+        sys.exit(1)
     
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     now_date = datetime.datetime.now().strftime("%Y%m%d")
@@ -310,7 +327,7 @@ def save_chapter_cmd(args):
     sdf_out_subdir.mkdir(parents=True, exist_ok=True)
     sdf_file = sdf_out_subdir / f"{book_code}.md"
     
-    with open(st_file, "r", encoding="utf-8") as f:
+    with open(active_st, "r", encoding="utf-8") as f:
         st_text = f.read()
         
     word_count = len(st_text.split())
@@ -321,7 +338,7 @@ def save_chapter_cmd(args):
 source_religion: Christianity
 source_tradition: Protestant
 source_book_code: {book_code}
-source_translation_file: {resolve_translation(translation)}.txt
+source_translation_file: {translation}.txt
 st_concepts_applied: []
 new_concepts_proposed: []
 generation_date: "{now_iso}"
@@ -336,17 +353,22 @@ pass_number: 1
         with open(sdf_file, "a", encoding="utf-8") as f:
             f.write(st_text + "\n\n")
 
-    # Q&D Output
+    # Q&D Output — merge from both naming conventions
     qd_count = 0
-    if qd_file.exists():
+    qd_combined = ""
+    for qf in [qd_file, qd_file_alt]:
+        if qf.exists():
+            with open(qf, "r", encoding="utf-8") as f:
+                text = f.read()
+                if text.strip():
+                    qd_combined += text + "\n\n"
+    
+    if qd_combined.strip():
         qd_file_out = QD_OUT_DIR / f"{now_date}_{executor}_{model}_{translation}_{book_code}.md"
-        with open(qd_file, "r", encoding="utf-8") as f:
-            qd_text = f.read()
-            if qd_text.strip():
-                QD_OUT_DIR.mkdir(parents=True, exist_ok=True)
-                qd_count = qd_text.count("### Q")
-                with open(qd_file_out, "a", encoding="utf-8") as fout:
-                    fout.write(qd_text + "\n\n")
+        QD_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        qd_count = qd_combined.count("### Q")
+        with open(qd_file_out, "a", encoding="utf-8") as fout:
+            fout.write(qd_combined)
                     
     # Update checkpoint
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
@@ -373,13 +395,10 @@ pass_number: 1
         with open(cp_file, "w", encoding="utf-8") as f:
             f.write(new_content)
                 
-    # Cleanup workspace
-    if st_file.exists():
-        st_file.unlink()
-    if qd_file.exists():
-        qd_file.unlink()
-    if raw_file.exists():
-        raw_file.unlink()
+    # Cleanup workspace — both naming conventions
+    for f in [st_file, qd_file, raw_file, st_file_alt, qd_file_alt, raw_file_alt]:
+        if f.exists():
+            f.unlink()
                 
     log_message(f"Chapter {chapter} saved and workspace cleaned successfully.")
 
@@ -395,24 +414,27 @@ def complete_pass_cmd(args):
     now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
     
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
-    if cp_file.exists():
-        with open(cp_file, "r", encoding="utf-8") as f:
-            content = f.read()
+    if not cp_file.exists():
+        log_message(f"FATAL: Checkpoint {cp_file} not found! Cannot complete pass without a checkpoint.")
+        sys.exit(1)
+
+    with open(cp_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
+    if match:
+        meta = yaml.safe_load(match.group(1))
+        meta["last_updated_at"] = now_iso
+        meta["status"] = "COMPLETED"
         
-        match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
-        if match:
-            meta = yaml.safe_load(match.group(1))
-            meta["last_updated_at"] = now_iso
-            meta["status"] = "COMPLETED"
-            
-            new_yaml = yaml.dump(meta, sort_keys=False)
-            new_content = content.replace(match.group(1), new_yaml.strip() + "\n")
-            
-            new_content += f"| `{now_iso}` | `FIRST_PASS_COMPLETE` | `/convert` | Total chapters: {total_chapters}. |\n"
-            new_content += f"| `{now_iso}` | `QD_CREATED` | `/convert` | Saved Q&D file with dilemmas. |\n"
-            
-            with open(cp_file, "w", encoding="utf-8") as f:
-                f.write(new_content)
+        new_yaml = yaml.dump(meta, sort_keys=False)
+        new_content = content.replace(match.group(1), new_yaml.strip() + "\n")
+        
+        new_content += f"| `{now_iso}` | `FIRST_PASS_COMPLETE` | `/convert` | Total chapters: {total_chapters}. |\n"
+        new_content += f"| `{now_iso}` | `QD_CREATED` | `/convert` | Saved Q&D file with dilemmas. |\n"
+        
+        with open(cp_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
     log_message("Pass completed successfully.")
 
 def check_status_for_translation(executor, model, translation):
@@ -557,6 +579,90 @@ def cleanup_workspace_cmd(args):
     log_message(f"Cleanup complete for {executor}/{model}.")
 
 
+def update_checkpoint_row_cmd(args):
+    """
+    Appends a row to an existing checkpoint's table and updates last_updated_at.
+    Used by the refine workflow to log feedback progress deterministically.
+    """
+    executor = sanitize_name(args.executor)
+    model = sanitize_name(args.model)
+    translation = resolve_translation(args.translation)
+    book_code = args.book_code.upper()
+    status_text = args.status_text
+    set_by = args.set_by
+    details = args.details
+
+    now_iso = datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat()
+
+    cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
+    if not cp_file.exists():
+        log_message(f"FATAL: Checkpoint {cp_file} not found!")
+        sys.exit(1)
+
+    with open(cp_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    match = re.search(r"---\n(.*?)\n---", content, re.DOTALL)
+    if match:
+        meta = yaml.safe_load(match.group(1))
+        meta["last_updated_at"] = now_iso
+        new_yaml = yaml.dump(meta, sort_keys=False)
+        content = content.replace(match.group(1), new_yaml.strip() + "\n")
+
+    row = f"| `{now_iso}` | `{status_text}` | `{set_by}` | {details} |\n"
+    content += row
+
+    with open(cp_file, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    log_message(f"Checkpoint row added: {status_text}")
+
+
+def truncate_sdf_chapter_cmd(args):
+    """
+    Removes all SDF content from a given chapter onwards.
+    Used during recovery to cleanly drop partial data before resuming.
+    """
+    executor = sanitize_name(args.executor)
+    model = sanitize_name(args.model)
+    translation = resolve_translation(args.translation)
+    book_code = args.book_code.upper()
+    from_chapter = args.from_chapter
+
+    sdf_subdir = SDF_OUT_DIR / f"{translation}_{model}_{executor}"
+    sdf_file = sdf_subdir / f"{book_code}.md"
+
+    if not sdf_file.exists():
+        log_message(f"FATAL: SDF file {sdf_file} not found!")
+        sys.exit(1)
+
+    with open(sdf_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    # Keep lines until we hit the first verse of from_chapter
+    kept_lines = []
+    dropped = 0
+    pattern = re.compile(rf"^{re.escape(book_code)} ({from_chapter}):\d+:")
+    found = False
+    for line in lines:
+        if not found:
+            # Check if this line starts the chapter we want to drop
+            ch_match = re.match(rf"^{re.escape(book_code)} (\d+):\d+:", line)
+            if ch_match and int(ch_match.group(1)) >= from_chapter:
+                found = True
+                dropped += 1
+                continue
+            kept_lines.append(line)
+        else:
+            dropped += 1
+
+    with open(sdf_file, "w", encoding="utf-8") as f:
+        f.writelines(kept_lines)
+
+    log_message(f"Truncated SDF: dropped {dropped} lines from chapter {from_chapter} onwards.")
+    log_message(f"Remaining content ends before chapter {from_chapter}.")
+
+
 def get_chapter_count_cmd(args):
     """
     Returns the total number of chapters for a given book in a translation.
@@ -600,6 +706,8 @@ def verify_book_cmd(args):
     book_code = args.book_code.upper()
 
     errors = []
+    cp_chapter_set = set()
+    sdf_chapters = set()
 
     # 1. Check checkpoint exists
     cp_file = SDF_CHECKPOINTS_DIR / f"{executor}_{model}_{translation}_{book_code}.md"
@@ -621,7 +729,6 @@ def verify_book_cmd(args):
         with open(sdf_file, "r", encoding="utf-8") as f:
             sdf_content = f.read()
         # Find all unique chapter numbers in SDF (format: BOOK CH:VERSE)
-        sdf_chapters = set()
         for m in re.finditer(rf"^{re.escape(book_code)} (\d+):\d+:", sdf_content, re.MULTILINE):
             sdf_chapters.add(int(m.group(1)))
 
@@ -654,10 +761,8 @@ def verify_book_cmd(args):
     log_message(f"=== Verify Book: {book_code} ===")
     log_message(f"Expected chapters: {total_expected}")
     if not errors:
-        checkpoint_count = len(cp_chapter_set) if cp_file.exists() else 0
-        sdf_count = len(sdf_chapters) if sdf_file.exists() else 0
-        log_message(f"Checkpoint rows: {checkpoint_count}")
-        log_message(f"SDF chapters: {sdf_count}")
+        log_message(f"Checkpoint rows: {len(cp_chapter_set)}")
+        log_message(f"SDF chapters: {len(sdf_chapters)}")
         log_message("RESULT=PASS")
     else:
         for e in errors:
@@ -745,6 +850,24 @@ def main():
     parser_vb.add_argument("--translation", required=True)
     parser_vb.add_argument("--book_code", required=True)
 
+    # update-checkpoint-row
+    parser_ucr = subparsers.add_parser("update-checkpoint-row", help="Append a row to checkpoint table")
+    parser_ucr.add_argument("--executor", required=True)
+    parser_ucr.add_argument("--model", required=True)
+    parser_ucr.add_argument("--translation", required=True)
+    parser_ucr.add_argument("--book_code", required=True)
+    parser_ucr.add_argument("--status_text", required=True, help="Status text for the row, e.g. CHAPTER 5 FEEDBACK APPLIED")
+    parser_ucr.add_argument("--set_by", required=True, help="Who set this, e.g. /refine")
+    parser_ucr.add_argument("--details", required=True, help="Details column text")
+
+    # truncate-sdf-chapter
+    parser_tsc = subparsers.add_parser("truncate-sdf-chapter", help="Remove SDF content from a chapter onwards")
+    parser_tsc.add_argument("--executor", required=True)
+    parser_tsc.add_argument("--model", required=True)
+    parser_tsc.add_argument("--translation", required=True)
+    parser_tsc.add_argument("--book_code", required=True)
+    parser_tsc.add_argument("--from_chapter", type=int, required=True, help="Drop all content from this chapter onwards")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -769,6 +892,10 @@ def main():
         get_chapter_count_cmd(args)
     elif args.command == "verify-book":
         verify_book_cmd(args)
+    elif args.command == "update-checkpoint-row":
+        update_checkpoint_row_cmd(args)
+    elif args.command == "truncate-sdf-chapter":
+        truncate_sdf_chapter_cmd(args)
 
 if __name__ == "__main__":
     main()
