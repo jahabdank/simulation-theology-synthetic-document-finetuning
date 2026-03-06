@@ -11,16 +11,17 @@ agent_times = {}
 date_pattern = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
 
 for log in LOGS:
-    # Extract agent name from log filename
-    # Format: 20260303_113328_antigravity_gemini-3-flash_eng-engbbe_2ki.log
-    agent_match = re.search(r"antigravity_([^/]+)_eng-engbbe", log)
-    if not agent_match:
-        # Fallback for different naming conventions
-        agent_match = re.search(r"antigravity_(.*?)_", log)
-        if not agent_match:
-            continue
+    # Extract executor and agent name from log filename
+    # Formats:
+    #   20260303_113328_antigravity_gemini-3-flash_eng-engbbe_2ki.log
+    #   20260303_150036_claude-code_claude-opus-4.6_eng-engbbe_gen.log
+    m = re.match(r"\d+_\d+_([^_]+)_(.+)_eng-engbbe_", log)
+    if not m:
+        continue
     
-    agent = agent_match.group(1).replace("-", " ")
+    executor = m.group(1)
+    model = m.group(2)
+    agent = f"{executor}/{model}".replace("-", " ")
     
     log_path = os.path.join(LOG_DIR, log)
     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:

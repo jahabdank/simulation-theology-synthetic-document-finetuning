@@ -29,3 +29,13 @@ Example:
 ```
 
 The pipeline is CLI-driven: each command prints a `▶ NEXT STEPS` block telling you exactly what to run next.
+
+### Parallelized (multi-agent) variant
+
+To run **multiple agents concurrently** on different books:
+
+```
+/convert-bible-to-st-automated-parallelized [executor-name] [model-name]
+```
+
+This uses `claim --parallel` to prevent two agents from claiming the same book. Launch in multiple Claude Code sessions simultaneously.

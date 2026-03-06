@@ -189,6 +189,25 @@ def claim_cmd(args):
     starting_chapter = 1
 
     if cp_file.exists():
+        # In parallel mode, refuse to recover a checkpoint that is actively being worked on
+        if getattr(args, "parallel", False):
+            content, meta = read_checkpoint_meta(cp_file)
+            status = meta.get("status")
+            last_updated_str = meta.get("last_updated_at", now_iso)
+            last_updated = datetime.datetime.fromisoformat(last_updated_str)
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            age_seconds = (now_utc - last_updated).total_seconds()
+            if status == "IN_PROGRESS" and age_seconds <= 20 * 60:
+                log_message(f"ALREADY_CLAIMED: {book_code} is actively being worked on (last updated {int(age_seconds)}s ago).")
+                print_next_steps([
+                    f"Book {book_code} is already claimed by another agent.",
+                    f"Re-run next-task to get a different book:",
+                    f"```",
+                    f'python3 code/st_pipeline_mngr.py next-task --executor "{args.executor}" --model "{args.model}"',
+                    f"```",
+                ])
+                return
+
         log_message(f"Recovering checkpoint {cp_file.name}...")
         content, meta = read_checkpoint_meta(cp_file)
         meta["last_updated_at"] = now_iso
@@ -950,6 +969,7 @@ def main():
     p.add_argument("--book_code", required=True)
     p.add_argument("--corpus_version", required=True)
     p.add_argument("--pipeline_version", required=True)
+    p.add_argument("--parallel", action="store_true", default=False)
 
     # get-chapter
     p = subparsers.add_parser("get-chapter")
